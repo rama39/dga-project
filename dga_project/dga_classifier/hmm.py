@@ -1,190 +1,167 @@
-"""
-hmm.py — Classificador HMM com teste de razão de verossimilhança de Neyman-Pearson.
-Alinhado com o artigo: Woodbridge et al., 2016 (arXiv:1611.00791), Seção IV.D.
-
-Especificação do artigo:
-  - 4 HMMs: 1 benigno + 3 maiores famílias DGA (Post/posttovargoz, banjori, ramnit)
-  - n_hidden_states = média do comprimento dos domínios no treino
-  - Classificação via: log P(i*) − log P(benign) ≥ η
-    onde i* = argmax_{i ∈ {banjori, ramnit, posttovargoz}} P_i(domínio)
-  - Score convertido para pseudo-probabilidade via sigmoid para compatibilidade com ROC
-
-Nota: hmmlearn.CategoricalHMM é o modelo correto (observações discretas = caracteres).
-Instalação: pip install hmmlearn
-"""
+"""Train and test Hidden Markov Model classifier"""
+import dga_classifier.data as data
 import numpy as np
 import sklearn.metrics
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+import warnings
+warnings.filterwarnings("ignore")
 
 try:
-    from hmmlearn import hmm as hmmlearn_hmm
-    HMM_AVAILABLE = True
+    from hmmlearn import hmm
 except ImportError:
-    HMM_AVAILABLE = False
-    print("[hmm] AVISO: hmmlearn não instalado. Execute: pip install hmmlearn")
-
-import dga_classifier.data as data
-from dga_classifier.data import TOP3_DGA_FAMILIES
+    print("hmmlearn not installed. Please run: pip install hmmlearn")
 
 
-# ------------------------------------------------------------
-# Utilidades de encoding
-# ------------------------------------------------------------
-
-def _build_char_encoder(domains):
-    """Cria LabelEncoder de caracteres e retorna (encoder, n_symbols)."""
-    all_chars = sorted(set(''.join(domains)))
-    le = LabelEncoder()
-    le.fit(all_chars)
-    return le, len(all_chars)
-
-
-def _encode_domains(domains, le):
-    """Converte lista de strings em lista de arrays int (shape Nx1 para hmmlearn)."""
-    encoded = []
-    for d in domains:
-        # Caracteres desconhecidos (não vistos no treino) são mapeados para 0
-        indices = []
-        for c in d:
-            if c in le.classes_:
-                indices.append(le.transform([c])[0])
-            else:
-                indices.append(0)
-        if indices:
-            encoded.append(np.array(indices, dtype=int).reshape(-1, 1))
-    return encoded
-
-
-def _train_hmm(encoded_seqs, n_components, n_symbols, n_iter=10):
-    """
-    Treina um CategoricalHMM numa lista de sequências codificadas.
-    Retorna o modelo ou None se não houver dados suficientes.
-    """
-    if not encoded_seqs:
+def train_hmm(X_enc, n_components):
+    """Helper to fit CategoricalHMM"""
+    if not X_enc:
         return None
+    X_concat = np.concatenate(X_enc)
+    lengths = [len(x) for x in X_enc]
+    
+    model = hmm.CategoricalHMM(n_components=n_components, n_iter=10, init_params='ste')
+    model.fit(X_concat, lengths)
+    return model
 
-    X_concat = np.concatenate(encoded_seqs)
-    lengths = [len(s) for s in encoded_seqs]
-
-    try:
-        model = hmmlearn_hmm.CategoricalHMM(
-            n_components=n_components,
-            n_iter=n_iter,
-            init_params='ste',
-            verbose=False,
-        )
-        model.n_features = n_symbols
-        model.fit(X_concat, lengths)
-        return model
-    except Exception as e:
-        print(f"[hmm] Aviso: falha no treino do HMM: {e}")
-        return None
-
-
-def _safe_score(model, x):
-    """Retorna log-probabilidade ou -inf se modelo for None ou score falhar."""
-    if model is None:
-        return -np.inf
-    try:
-        return model.score(x)
-    except Exception:
-        return -np.inf
-
-
-def _to_prob(log_ratio):
-    """Converte log-razão em pseudo-probabilidade via sigmoid (com clip anti-overflow)."""
-    log_ratio_clipped = np.clip(log_ratio, -500, 500)
-    return 1.0 / (1.0 + np.exp(-log_ratio_clipped))
-
-
-# ------------------------------------------------------------
-# Pipeline principal
-# ------------------------------------------------------------
 
 def run(nfolds=10):
-    """
-    Treina e avalia HMM + Neyman-Pearson (classificação binária).
-    Retorna lista de dicts compatíveis com run.py::create_figs().
-    """
-    if not HMM_AVAILABLE:
-        raise ImportError("hmmlearn não está instalado. Execute: pip install hmmlearn")
-
+    """Run train/test on HMM binary classifier"""
     indata = data.get_data()
 
-    X_raw = np.array([x[1] for x in indata])
-    labels = np.array([x[0] for x in indata])
-    families = np.array([x[2] for x in indata])
-    y = np.array([0 if lbl == 'benign' else 1 for lbl in labels])
+    # Extract data and labels
+    X = [x[1] for x in indata]
+    labels = [x[0] for x in indata]
+    families = [x[2] for x in indata]
 
-    # Vocabulário construído sobre TODO o dataset
-    le, n_symbols = _build_char_encoder(X_raw.tolist())
+    # Generate a dictionary of valid characters
+    valid_chars = {x:idx for idx, x in enumerate(set(''.join(X)))}
 
-    # n_components = média do comprimento dos domínios (especificação do artigo)
-    avg_len = max(2, int(np.mean([len(d) for d in X_raw])))
-    print(f"[hmm] n_hidden_states = {avg_len} (média de comprimento)")
+    # Convert characters to int (2D arrays required by hmmlearn)
+    X_enc = [np.array([[valid_chars.get(y, 0)] for y in x]) for x in X]
+
+    # Number of hidden states is set to average length of domains
+    avg_len = int(np.mean([len(x) for x in X]))
+
+    # Convert labels to 0-1
+    y = np.array([0 if x == 'benign' else 1 for x in labels])
+    families = np.array(families)
+    labels = np.array(labels)
+
+    # The 3 largest families as specified in the paper
+    top3_dga = ['posttovargoz', 'banjori', 'ramnit']
 
     final_data = []
 
     for fold in range(nfolds):
-        print(f"[hmm] fold {fold + 1}/{nfolds}")
+        print("fold %u/%u" % (fold+1, nfolds))
+        X_train, X_test, y_train, y_test, fam_train, _, _, label_test = train_test_split(
+            X_enc, y, families, labels, test_size=0.2, random_state=fold)
 
-        (X_train_raw, X_test_raw,
-         y_train, y_test,
-         labels_train, lbl_test,
-         fam_train, _) = train_test_split(
-            X_raw, y, labels, families, test_size=0.2, random_state=fold
-        )
+        print('Build model...')
+        X_benign = [x for x, l in zip(X_train, y_train) if l == 0]
+        hmm_benign = train_hmm(X_benign, avg_len)
 
-        # ----------------------------------------------------------
-        # Treinar HMM benigno
-        # ----------------------------------------------------------
-        benign_seqs = _encode_domains(
-            X_train_raw[labels_train == 'benign'].tolist(), le
-        )
-        print(f"  [hmm] Treinando HMM benigno ({len(benign_seqs)} seqs)...")
-        hmm_benign = _train_hmm(benign_seqs, avg_len, n_symbols)
+        hmm_dgas = []
+        for fam in top3_dga:
+            X_fam = [x for x, f in zip(X_train, fam_train) if f == fam]
+            hmm_dgas.append(train_hmm(X_fam, avg_len))
 
-        # ----------------------------------------------------------
-        # Treinar HMMs DGA (3 maiores famílias)
-        # ----------------------------------------------------------
-        hmm_dga = {}
-        for fam in TOP3_DGA_FAMILIES:
-            mask = (fam_train == fam)
-            seqs = _encode_domains(X_train_raw[mask].tolist(), le)
-            print(f"  [hmm] Treinando HMM '{fam}' ({len(seqs)} seqs)...")
-            hmm_dga[fam] = _train_hmm(seqs, avg_len, n_symbols)
-
-        # ----------------------------------------------------------
-        # Predição: Neyman-Pearson likelihood ratio
-        # ----------------------------------------------------------
-        X_test_enc = _encode_domains(X_test_raw.tolist(), le)
-
+        print("Predicting Neyman-Pearson likelihood ratio...")
         probs = []
-        for x in X_test_enc:
-            score_benign = _safe_score(hmm_benign, x)
-
-            # i* = argmax sobre os 3 HMMs DGA
-            score_dga = max(
-                _safe_score(hmm_dga.get(fam), x)
-                for fam in TOP3_DGA_FAMILIES
-            )
+        for x in X_test:
+            score_benign = hmm_benign.score(x) if hmm_benign else -np.inf
+            score_dga = -np.inf
+            for m in hmm_dgas:
+                if m:
+                    try:
+                        score_dga = max(score_dga, m.score(x))
+                    except:
+                        pass
 
             log_ratio = score_dga - score_benign
-            p_dga = _to_prob(log_ratio)
-            probs.append([1.0 - p_dga, p_dga])
+            
+            # Convert to pseudo probability [0, 1] via sigmoid for ROC compatibility
+            p_dga = 1.0 / (1.0 + np.exp(-np.clip(log_ratio, -500, 500)))
+            probs.append(p_dga)
 
         probs = np.array(probs)
-        preds = np.argmax(probs, axis=1)
-        probs_pos = probs[:, 1]  # probabilidade da classe positiva (DGA)
+        t_auc = sklearn.metrics.roc_auc_score(y_test, probs)
 
-        out_data = {
-            'y': y_test,
-            'labels': lbl_test,
-            'probs': probs_pos,
-            'epochs': 1,
-            'confusion_matrix': sklearn.metrics.confusion_matrix(y_test, preds),
-        }
+        print('Epoch 1: auc = %f' % (t_auc))
+
+        out_data = {'y':y_test, 'labels': label_test, 'probs':probs, 'epochs': 1,
+                    'confusion_matrix': sklearn.metrics.confusion_matrix(y_test, probs > .5)}
+
+        print(sklearn.metrics.confusion_matrix(y_test, probs > .5))
         final_data.append(out_data)
 
     return final_data
+
+
+def run_leave_class_out():
+    """Run leave-class-out experiment for HMM (Table III)"""
+    indata = data.get_data()
+
+    X_raw = [x[1] for x in indata]
+    labels = np.array([x[0] for x in indata])
+    families = np.array([x[2] for x in indata])
+
+    valid_chars = {x:idx for idx, x in enumerate(set(''.join(X_raw)))}
+    X_enc = np.array([np.array([[valid_chars.get(y, 0)] for y in x]) for x in X_raw], dtype=object)
+
+    avg_len = int(np.mean([len(x) for x in X_raw]))
+
+    leave_out_families = data.LEAVE_OUT_FAMILIES
+    leave_out_set = set(leave_out_families)
+
+    is_leave_out = np.array([f in leave_out_set for f in families])
+    train_mask = ~is_leave_out
+    test_mask = is_leave_out
+
+    X_train_full = X_enc[train_mask]
+    fam_train_full = families[train_mask]
+    y_train_full = np.array([0 if l == 'benign' else 1 for l in labels[train_mask]])
+
+    X_test = X_enc[test_mask]
+    families_test = families[test_mask]
+
+    print('Build model for Leave-Class-Out...')
+    X_benign = [x for x, y_val in zip(X_train_full, y_train_full) if y_val == 0]
+    hmm_benign = train_hmm(X_benign, avg_len)
+
+    print("Train DGA HMMs...")
+    top3_dga = ['posttovargoz', 'banjori', 'ramnit']
+    hmm_dgas = []
+    for fam in top3_dga:
+        X_fam = [x for x, f in zip(X_train_full, fam_train_full) if f == fam]
+        hmm_dgas.append(train_hmm(X_fam, avg_len))
+
+    probs_test = []
+    for x in X_test:
+        score_benign = hmm_benign.score(x) if hmm_benign else -np.inf
+        score_dga = -np.inf
+        for m in hmm_dgas:
+            if m:
+                try:
+                    score_dga = max(score_dga, m.score(x))
+                except:
+                    pass
+        log_ratio = score_dga - score_benign
+        p_dga = 1.0 / (1.0 + np.exp(-np.clip(log_ratio, -500, 500)))
+        probs_test.append(p_dga)
+
+    preds_test = (np.array(probs_test) > 0.5).astype(int)
+
+    recall_per_family = {}
+    for fam in leave_out_families:
+        mask = (families_test == fam)
+        if mask.sum() > 0:
+            recall_per_family[fam] = float(preds_test[mask].mean())
+        else:
+            recall_per_family[fam] = 0.0
+
+    out_data = {'epochs': 1, 'recall_per_family': recall_per_family, 'micro_recall': float(preds_test.mean())}
+    return out_data
+
+# Nota: O run_multiclass foi omitido propositalmente, 
+# pois o artigo relata que o HMM não foi testado nesse cenário.
