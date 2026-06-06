@@ -1,16 +1,10 @@
 """
-data.py — carrega Alexa Top 1M e Bambenek DGA (30 famílias).
+data.py — Carrega Alexa Top 1M e Bambenek DGA.
 Retorna lista de tuplas (label_binaria, dominio_sem_tld, familia).
-  label_binaria: 'benign' ou 'dga'
-  dominio_sem_tld: string lowercase sem TLD
-  familia: nome normalizado da família (ex: 'banjori', 'posttovargoz', 'benign')
-
-Compatível com lstm.py, bigram.py, randomforest.py e hmm.py.
 """
-import pandas as pd
 import os
 import random
-
+import csv
 
 # Mapeamento de normalização: nome no CSV → nome canônico usado no código
 FAMILY_NAME_MAP = {
@@ -18,6 +12,10 @@ FAMILY_NAME_MAP = {
     'p2p':                  'p2pgameoverzeus',
     'post':                 'posttovargoz',
     'volatile':             'volatilecedar',
+    'explosive':            'volatilecedar',
+    'urlzone':              'shiotob',
+    'bebloh':               'shiotob',
+    'shiotob/urlzone/bebloh': 'shiotob',
     'banjori':              'banjori',
     'bedep':                'bedep',
     'beebone':              'beebone',
@@ -38,7 +36,6 @@ FAMILY_NAME_MAP = {
     'ramnit':               'ramnit',
     'ranbyus':              'ranbyus',
     'shifu':                'shifu',
-    'shiotob/urlzone/bebloh': 'shiotob',
     'simda':                'simda',
     'suppobox':             'suppobox',
     'symmi':                'symmi',
@@ -46,9 +43,26 @@ FAMILY_NAME_MAP = {
     'tinba':                'tinba',
 }
 
+# Mapeamento Tabela V do artigo (Superfamílias) centralizado
+SUPERFAMILY_MAP = {
+    'dyre':           1,
+    'beebone':        2,
+    'volatilecedar':  3,
+    'shiotob':        4,
+    'banjori':        5, 'cryptowall': 5, 'matsnu': 5, 'suppobox': 5,
+    'murofet':        6, 'tinba': 6, 'shifu': 6, 'geodo': 6, 'necurs': 6,
+    'cryptolocker':   6, 'ramnit': 6, 'ranbyus': 6, 'bedep': 6,
+    'hesperbot':      6, 'tempedreve': 6, 'fobber': 6, 'nymaim': 6,
+    'qakbot':         6, 'p2pgameoverzeus': 6, 'dircrypt': 6,
+    'pykspa':         7,
+    'pushdo':         8, 'simda': 8,
+    'posttovargoz':   9,
+    'corebot':        10,
+    'symmi':          11,
+}
+
 # As 3 maiores famílias do dataset (para treino dos HMMs DGA)
-# Banjori (~439k), Post/posttovargoz (~66k), Ramnit (~56k)
-TOP3_DGA_FAMILIES = ['banjori', 'posttovargoz', 'ramnit']
+TOP3_DGA_FAMILIES = ['posttovargoz', 'banjori', 'ramnit']
 
 # As 10 menores famílias (experimento Leave-Class-Out)
 LEAVE_OUT_FAMILIES = [
@@ -56,82 +70,63 @@ LEAVE_OUT_FAMILIES = [
     'fobber', 'hesperbot', 'matsnu', 'symmi', 'tempedreve'
 ]
 
-
-def _strip_tld(domain: str) -> str:
+def _strip_tld(domain):
     """Remove o TLD e retorna apenas o SLD em lowercase."""
-    domain = domain.lower().strip()
+    domain = str(domain).lower().strip()
     parts = domain.split('.')
-    # Mantém subdomínios mas remove o TLD (último elemento)
-    return parts[0] if len(parts) == 1 else '.'.join(parts[:-1])
+    if len(parts) == 1:
+        return parts[0]
+    return '.'.join(parts[:-1])
 
 
-def get_data(
-    dga_path: str = os.path.join('datasets', 'bambenek_dga_domain_30.csv'),
-    alexa_path: str = os.path.join('datasets', 'top-1m.csv'),
-    samples_per_family: int = 2000,
-    seed: int = 42,
-):
+def get_data(dga_path='datasets/bambenek_dga_domain_30.csv',
+             alexa_path='datasets/top-1m.csv',
+             seed=42):
     """
-    Carrega e balanceia os datasets.
-
-    Parâmetros
-    ----------
-    dga_path : caminho para o CSV do Bambenek
-    alexa_path : caminho para o CSV do Alexa Top 1M
-    samples_per_family : máximo de domínios por família DGA (reduz uso de RAM)
-    seed : semente aleatória para reprodutibilidade
-
-    Retorna
-    -------
-    list[tuple[str, str, str]]
-        Cada elemento: (label_binaria, dominio_sem_tld, familia_normalizada)
+    Carrega os datasets respeitando o volume total (~750k DGA) e a proporção de classes reais.
     """
     indata = []
 
-    # ------------------------------------------------------------------
-    # 1. Dataset DGA (Bambenek)
-    # ------------------------------------------------------------------
-    print(f"[data] Lendo DGA de: {dga_path}")
-    df_dga = pd.read_csv(dga_path)
-
-    # Amostragem estratificada por família
-    df_dga_sample = (
-        df_dga
-        .groupby('DGA_family', group_keys=False)
-        .apply(lambda g: g.sample(n=min(len(g), samples_per_family), random_state=seed))
-        .reset_index(drop=True)
-    )
-
-    for _, row in df_dga_sample.iterrows():
-        raw_family = str(row['DGA_family']).lower().strip()
-        family = FAMILY_NAME_MAP.get(raw_family, raw_family)
-        domain = _strip_tld(str(row['Domain']))
-        if domain:
-            indata.append(('dga', domain, family))
+    print("[data] Lendo DGA (mantendo distribuicao real das classes)...")
+    try:
+        with open(dga_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                raw_family = str(row.get('DGA_family', '')).lower().strip()
+                family = FAMILY_NAME_MAP.get(raw_family, raw_family)
+                domain = _strip_tld(row.get('Domain', ''))
+                if domain:
+                    indata.append(('dga', domain, family))
+    except IOError:
+        print("[data] Erro: Arquivo DGA nao encontrado em", dga_path)
 
     n_dga = len(indata)
-    print(f"[data] DGA carregados: {n_dga}")
+    print("[data] Dominios DGA carregados: %d" % n_dga)
 
-    # ------------------------------------------------------------------
-    # 2. Dataset benigno (Alexa Top 1M)
-    # ------------------------------------------------------------------
-    print(f"[data] Lendo Alexa de: {alexa_path}")
-    df_alexa = pd.read_csv(alexa_path, header=None, names=['rank', 'domain'])
-    df_alexa = df_alexa.dropna(subset=['domain'])
-    df_alexa_sample = df_alexa.sample(n=min(n_dga, len(df_alexa)), random_state=seed)
+    print("[data] Lendo Alexa Top 1M...")
+    alexa_data = []
+    try:
+        with open(alexa_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) > 1:
+                    domain = _strip_tld(row[1])
+                    if domain:
+                        alexa_data.append(('benign', domain, 'benign'))
+    except IOError:
+        print("[data] Erro: Arquivo Alexa nao encontrado em", alexa_path)
 
-    for domain_raw in df_alexa_sample['domain']:
-        domain = _strip_tld(str(domain_raw))
-        if domain:
-            indata.append(('benign', domain, 'benign'))
+    # Pareamento: Usa o mesmo número de amostras benignas que a soma dos DGAs
+    random.seed(seed)
+    random.shuffle(alexa_data)
+    
+    sample_size = min(n_dga, len(alexa_data))
+    indata.extend(alexa_data[:sample_size])
 
-    print(f"[data] Benignos carregados: {len(indata) - n_dga}")
+    print("[data] Dominios Benignos amostrados: %d" % sample_size)
 
-    # ------------------------------------------------------------------
-    # 3. Embaralhar
-    # ------------------------------------------------------------------
     random.seed(seed)
     random.shuffle(indata)
 
-    print(f"[data] Total de amostras: {len(indata)}")
+    print("[data] Dataset carregado. Total de amostras: %d" % len(indata))
     return indata
