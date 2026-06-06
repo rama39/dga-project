@@ -26,10 +26,7 @@ import dga_classifier.hmm as hmm_clf
 RESULT_FILE = 'results_binary.pkl'
 
 
-# ------------------------------------------------------------
 # Experimento 1 — Classificação Binária
-# ------------------------------------------------------------
-
 def run_experiments(isbigram=True, islstm=True, isrf=True, ishmm=True, nfolds=10):
     results = {'bigram': None, 'lstm': None, 'rf': None, 'hmm': None}
 
@@ -126,57 +123,74 @@ def create_figs(isbigram=True, islstm=True, isrf=True, ishmm=True, nfolds=10, fo
     plt.close()
 
 
-# ------------------------------------------------------------
 # Experimento 2 — Leave-Class-Out
-# ------------------------------------------------------------
-
 def run_leave_class_out_experiment():
-    """Executa Exp. 2 e imprime Tabela III no console."""
+    """Executa Exp. 2 e imprime Tabela III no console para todos os modelos."""
     print("\n=== Experimento 2: Leave-Class-Out ===")
-    lco = lstm.run_leave_class_out()
+    
+    lco_results = {
+        'HMM': hmm_clf.run_leave_class_out(),
+        'Features': rf.run_leave_class_out(),
+        'Bigram': bigram.run_leave_class_out(),
+        'LSTM': lstm.run_leave_class_out()
+    }
 
     with open('lco_results.pkl', 'wb') as f:
-        pickle.dump(lco, f)
+        pickle.dump(lco_results, f)
 
-    print("\nTabela III — Recall por família (LSTM):")
-    print(f"{'Família':<20} {'Recall':>8}")
-    print("-" * 30)
-    for fam, recall in sorted(lco['recall_per_family'].items()):
-        print(f"{fam:<20} {recall:>8.2f}")
-    print(f"\n{'Micro recall geral':<20} {lco['micro_recall']:>8.2f}")
-    return lco
+    print("\nTabela III — Recall por família:")
+    print(f"{'Domain Type':<20} | {'HMM':<6} | {'Features':<10} | {'Bigram':<8} | {'LSTM':<6}")
+    print("-" * 65)
+    
+    # Extraindo as chaves (famílias) baseadas no primeiro resultado
+    families = sorted(lco_results['LSTM']['recall_per_family'].keys())
+    
+    for fam in families:
+        hmm_val = lco_results['HMM']['recall_per_family'].get(fam, 0.0)
+        rf_val = lco_results['Features']['recall_per_family'].get(fam, 0.0)
+        bigram_val = lco_results['Bigram']['recall_per_family'].get(fam, 0.0)
+        lstm_val = lco_results['LSTM']['recall_per_family'].get(fam, 0.0)
+        print(f"{fam:<20} | {hmm_val:<6.2f} | {rf_val:<10.2f} | {bigram_val:<8.2f} | {lstm_val:<6.2f}")
+        
+    print("-" * 65)
+    print(f"{'micro':<20} | {lco_results['HMM']['micro_recall']:<6.2f} | {lco_results['Features']['micro_recall']:<10.2f} | {lco_results['Bigram']['micro_recall']:<8.2f} | {lco_results['LSTM']['micro_recall']:<6.2f}")
+    
+    return lco_results
 
 
-# ------------------------------------------------------------
 # Experimento 3 — Multiclasse
-# ------------------------------------------------------------
-
 def run_multiclass_experiment(use_superfamilies=False, nfolds=1):
-    """Executa Exp. 3 e imprime classification_report no console."""
+    """Executa Exp. 3 para LSTM, Bigram e RF (exclui HMM conforme artigo)."""
     tag = 'superfamilias' if use_superfamilies else 'familias'
     print(f"\n=== Experimento 3: Multiclasse ({tag}) ===")
 
-    results = lstm.run_multiclass(nfolds=nfolds, use_superfamilies=use_superfamilies)
+    models = {
+        'Bigram': bigram,
+        'Features': rf,
+        'LSTM': lstm
+    }
+    
+    all_results = {}
+    
+    for name, module in models.items():
+        print(f"\n--- Treinando modelo Multiclasse: {name} ---")
+        res = module.run_multiclass(nfolds=nfolds, use_superfamilies=use_superfamilies)
+        all_results[name] = res
+        
+        # Imprime o report da última fold como resumo no console
+        print(f"\nClassification Report ({name} - Última Fold):")
+        print(res[-1].get('classification_report', 'sem report'))
 
     fname = f'multi_results_{tag}.pkl'
     with open(fname, 'wb') as f:
-        pickle.dump(results, f)
+        pickle.dump(all_results, f)
 
-    for fold_idx, res in enumerate(results):
-        print(f"\n--- Fold {fold_idx + 1} ---")
-        print(res.get('classification_report', 'sem report'))
-
-    return results
+    return all_results
 
 
-# ------------------------------------------------------------
 # Entrypoint
-# ------------------------------------------------------------
-
 if __name__ == '__main__':
-    # ----------------------------------------------------------
     # Para teste rápido use nfolds=1; para resultados finais nfolds=10
-    # ----------------------------------------------------------
     NFOLDS = 1  # altere para 10 na versão final
 
     print("=" * 60)
